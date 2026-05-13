@@ -12,6 +12,7 @@ import {
   ContainerState,
   EnsureRunningOptions,
   PluginConfig,
+  PermissionFixPolicy,
   PruneResult,
   UpdateResourcesResult,
   VolumeIssue,
@@ -159,6 +160,11 @@ export default (app: App) => {
   // the new one.
   const perCallOnContainerLogUnsub = new Map<string, () => void>();
   let currentOverrides: Record<string, ContainerResourceLimits> = {};
+  let currentPermissionFixPolicy: PermissionFixPolicy = {
+    enabled: true,
+    allowFsTypes: [],
+    fatFsTypes: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+  };
   // Cached result of resolveSignalkDataSource() — resolved once on first
   // ensureRunning() call that uses signalkDataMount, then reused.
   // `pendingDataSource` collapses concurrent resolutions onto one inspect.
@@ -796,12 +802,16 @@ export default (app: App) => {
       lastVolumeIssues.set(name, { skipped, aborted });
 
       try {
+        const internalOptions: EnsureRunningOptions = {
+          ...(options ?? {}),
+          permissionFixPolicy: currentPermissionFixPolicy,
+        };
         await ensureRunning(
           runtimeInfo,
           name,
           effectiveConfig,
           (msg) => app.debug(msg),
-          options,
+          internalOptions,
           undefined,
           priorConfig,
         );
@@ -1034,13 +1044,23 @@ export default (app: App) => {
 
     async stop(name: string) {
       if (!runtimeInfo) throw new Error("No container runtime available");
-      await stopContainer(runtimeInfo, name);
+      await stopContainer(
+        runtimeInfo,
+        name,
+        undefined,
+        currentPermissionFixPolicy,
+      );
       evictContainerAddresses(name);
     },
 
     async remove(name: string) {
       if (!runtimeInfo) throw new Error("No container runtime available");
-      await removeContainer(runtimeInfo, name);
+      await removeContainer(
+        runtimeInfo,
+        name,
+        undefined,
+        currentPermissionFixPolicy,
+      );
       evictContainerAddresses(name);
       // Tear down the log-stream broker — notifies any SSE clients
       // with `event: end` and stops the underlying `podman logs -f`.
@@ -1266,7 +1286,12 @@ export default (app: App) => {
       // target — it's what the consumer plugin most recently asked
       // for, minus our new resources. (Bug A fix.)
       try {
-        await removeContainer(runtimeInfo, name);
+        await removeContainer(
+          runtimeInfo,
+          name,
+          undefined,
+          currentPermissionFixPolicy,
+        );
       } catch (err) {
         warnings.push(
           `remove during recreate: ${err instanceof Error ? err.message : String(err)}`,
@@ -1274,8 +1299,12 @@ export default (app: App) => {
       }
 
       try {
-        await ensureRunning(runtimeInfo, name, newConfig, (msg) =>
-          app.debug(msg),
+        await ensureRunning(
+          runtimeInfo,
+          name,
+          newConfig,
+          (msg) => app.debug(msg),
+          { permissionFixPolicy: currentPermissionFixPolicy },
         );
       } catch (recreateErr) {
         // Recreate failed — the container is gone or in a bad state.
@@ -1291,9 +1320,18 @@ export default (app: App) => {
 
         try {
           // Make sure no half-created container is in the way.
-          await removeContainer(runtimeInfo, name).catch(() => {});
-          await ensureRunning(runtimeInfo, name, cachedConfig, (msg) =>
-            app.debug(msg),
+          await removeContainer(
+            runtimeInfo,
+            name,
+            undefined,
+            currentPermissionFixPolicy,
+          ).catch(() => {});
+          await ensureRunning(
+            runtimeInfo,
+            name,
+            cachedConfig,
+            (msg) => app.debug(msg),
+            { permissionFixPolicy: currentPermissionFixPolicy },
           );
           // Rollback succeeded — internal state is unchanged. Throw a
           // wrapper that carries the original recreate error as `cause`
@@ -1431,6 +1469,37 @@ export default (app: App) => {
           description:
             "Periodically check for container image updates in the background. Disable on metered connections — manual checks via the UI button still work.",
         },
+        permissionFix: {
+          type: "object" as const,
+          title: "Bind-mount permission-fix policy",
+          description:
+            "Controls when signalk-container may run recursive chmod on bind mounts during stop/remove. " +
+            "By default, FAT-like filesystems are allowed and non-FAT filesystems are denied unless explicitly listed.",
+          properties: {
+            enabled: {
+              type: "boolean",
+              default: true,
+              title: "Enable permission-fix chmod step",
+            },
+            allowFsTypes: {
+              type: "array",
+              title: "Additionally allowed non-FAT filesystem types",
+              items: { type: "string" },
+              default: [],
+            },
+            fatFsTypes: {
+              type: "array",
+              title: "Filesystem types treated as FAT-like (allowed by default)",
+              items: { type: "string" },
+              default: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+            },
+          },
+          default: {
+            enabled: true,
+            allowFsTypes: [],
+            fatFsTypes: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+          },
+        },
         containerOverrides: {
           type: "object" as const,
           title: "Per-container resource overrides",
@@ -1499,6 +1568,13 @@ export default (app: App) => {
       // to stop+start this plugin, so the new overrides take effect
       // on the next ensureRunning() call from each consumer.
       currentOverrides = config.containerOverrides ?? {};
+      currentPermissionFixPolicy = {
+        enabled: config.permissionFix?.enabled !== false,
+        allowFsTypes: config.permissionFix?.allowFsTypes ?? [],
+        fatFsTypes:
+          config.permissionFix?.fatFsTypes ??
+          ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+      };
 
       // Instantiate the update service synchronously so consumer
       // plugins can call containers.updates.register(...) before
@@ -1636,6 +1712,11 @@ export default (app: App) => {
       effectiveResources.clear();
       pluginDefaults.clear();
       currentOverrides = {};
+      currentPermissionFixPolicy = {
+        enabled: true,
+        allowFsTypes: [],
+        fatFsTypes: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+      };
       currentConfig = null;
       cachedDataSource = null;
       pendingDataSource = null;

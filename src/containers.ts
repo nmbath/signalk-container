@@ -1,8 +1,9 @@
 import * as net from "node:net";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statfsSync } from "node:fs";
 import {
   ContainerConfig,
   ContainerInfo,
+  PermissionFixPolicy,
   ContainerRuntimeInfo,
   ContainerState,
   HealthCheckOptions,
@@ -517,6 +518,69 @@ type ExecFn = (
   runtime: ContainerRuntimeInfo,
   args: string[],
 ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+
+const DEFAULT_FAT_FS_TYPES = new Set([
+  "exfat",
+  "exfat-fuse",
+  "vfat",
+  "msdos",
+  "fat",
+  "fat32",
+  "texfat",
+]);
+
+const FS_MAGIC_TO_NAME = new Map<number, string>([
+  [0x4d44, "msdos"],
+  [0x2011bab0, "exfat"],
+  [0xef53, "ext4"],
+  [0x58465342, "xfs"],
+  [0x9123683e, "btrfs"],
+  [0x2fc12fc1, "zfs"],
+]);
+
+function normalizePolicy(policy: PermissionFixPolicy | undefined): {
+  enabled: boolean;
+  fatFsTypes: Set<string>;
+  allowFsTypes: Set<string>;
+} {
+  const enabled = policy?.enabled !== false;
+  const fatFsTypes = new Set(
+    (policy?.fatFsTypes && policy.fatFsTypes.length > 0
+      ? policy.fatFsTypes
+      : [...DEFAULT_FAT_FS_TYPES]
+    ).map((v) => v.toLowerCase().trim()),
+  );
+  const allowFsTypes = new Set(
+    (policy?.allowFsTypes ?? []).map((v) => v.toLowerCase().trim()),
+  );
+  return { enabled, fatFsTypes, allowFsTypes };
+}
+
+function fsTypeFromMagic(magic: number): string | null {
+  return FS_MAGIC_TO_NAME.get(magic) ?? null;
+}
+
+function detectFsType(sourcePath: string): string | null {
+  try {
+    const stat = statfsSync(sourcePath);
+    const magic = Number(BigInt.asUintN(32, BigInt(stat.type)));
+    return fsTypeFromMagic(magic);
+  } catch {
+    return null;
+  }
+}
+
+export function shouldApplyPermissionFixForFsType(
+  fsType: string | null,
+  policy: PermissionFixPolicy | undefined,
+): boolean {
+  const normalized = normalizePolicy(policy);
+  if (!normalized.enabled) return false;
+  if (!fsType) return false;
+  const t = fsType.toLowerCase().trim();
+  if (normalized.fatFsTypes.has(t)) return true;
+  return normalized.allowFsTypes.has(t);
+}
 
 /**
  * Read the live resource limits applied to a managed container,
@@ -1249,7 +1313,7 @@ export async function ensureRunning(
     debug(
       `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
     );
-    await removeContainer(runtime, name, exec);
+    await removeContainer(runtime, name, exec, options?.permissionFixPolicy);
     await ensureRunning(
       runtime,
       name,
@@ -1333,37 +1397,62 @@ async function fixVolumePermissions(
   runtime: ContainerRuntimeInfo,
   name: string,
   exec: ExecFn = execRuntime,
+  permissionFixPolicy?: PermissionFixPolicy,
 ): Promise<void> {
+  const normalized = normalizePolicy(permissionFixPolicy);
+  if (!normalized.enabled) return;
+
   const fullName = prefixedName(name);
   const state = await getContainerState(runtime, name, exec);
   if (state !== "running") return;
 
-  // Get bind-mounted volume destinations inside the container
+  // Get bind-mounted source+destination pairs so policy can classify by fs type.
   const inspect = await exec(runtime, [
     "inspect",
     "--format",
-    '{{range .Mounts}}{{if eq .Type "bind"}}{{.Destination}} {{end}}{{end}}',
+    '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}|{{.Destination}}\n{{end}}{{end}}',
     fullName,
   ]);
-  const mounts = inspect.stdout.trim().split(/\s+/).filter(Boolean);
-  if (mounts.length === 0) return;
+
+  const mountLines = inspect.stdout.split("\n").filter(Boolean);
+  const allowedDestinations: string[] = [];
+  for (const line of mountLines) {
+    const [source, destination] = line.split("|");
+    if (!source || !destination) continue;
+    const fsType = detectFsType(source);
+    if (shouldApplyPermissionFixForFsType(fsType, permissionFixPolicy)) {
+      allowedDestinations.push(destination);
+    }
+  }
+  if (allowedDestinations.length === 0) return;
 
   // Grant "others" read/write/execute on bind mounts so the host user
   // (which is "others" relative to the container's user namespace mapped
   // UID) can delete the files. Owner permissions stay unchanged. Falls
   // back silently if chmod isn't available in the image (distroless etc.).
-  await exec(runtime, ["exec", fullName, "chmod", "-R", "o+rwX", ...mounts]);
+  await exec(runtime, [
+    "exec",
+    fullName,
+    "chmod",
+    "-R",
+    "o+rwX",
+    ...allowedDestinations,
+  ]);
 }
 
 export async function stopContainer(
   runtime: ContainerRuntimeInfo,
   name: string,
+  exec: ExecFn = execRuntime,
+  permissionFixPolicy?: PermissionFixPolicy,
 ): Promise<void> {
   const fullName = prefixedName(name);
-  await fixVolumePermissions(runtime, name).catch(() => {});
-  const result = await execRuntime(runtime, ["stop", fullName]);
+  await fixVolumePermissions(runtime, name, exec, permissionFixPolicy).catch(
+    () => {},
+  );
+  const result = await exec(runtime, ["stop", fullName]);
   if (result.exitCode !== 0) {
-    const state = await getContainerState(runtime, name);
+    const state = await getContainerState(runtime, name, exec);
     if (state !== "stopped" && state !== "missing") {
       throw new Error(`Failed to stop ${fullName}: ${result.stderr}`);
     }
@@ -1374,9 +1463,12 @@ export async function removeContainer(
   runtime: ContainerRuntimeInfo,
   name: string,
   exec: ExecFn = execRuntime,
+  permissionFixPolicy?: PermissionFixPolicy,
 ): Promise<void> {
   const fullName = prefixedName(name);
-  await fixVolumePermissions(runtime, name, exec).catch(() => {});
+  await fixVolumePermissions(runtime, name, exec, permissionFixPolicy).catch(
+    () => {},
+  );
   await exec(runtime, ["stop", fullName]);
   const result = await exec(runtime, ["rm", "-f", fullName]);
   if (result.exitCode !== 0) {

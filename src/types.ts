@@ -205,6 +205,30 @@ export interface ContainerResourceLimits {
   oomScoreAdj?: number | null;
 }
 
+/**
+ * Policy for signalk-container's bind-mount permission-fix step
+ * (`chmod -R o+rwX ...`) that runs during stop/remove lifecycle paths.
+ *
+ * Default behavior is conservative:
+ *   - FAT-style filesystems are allowed by default.
+ *   - Non-FAT filesystems are denied unless explicitly listed in
+ *     `allowFsTypes`.
+ */
+export interface PermissionFixPolicy {
+  /** Master switch for the permission-fix step. Defaults to true. */
+  enabled?: boolean;
+  /**
+   * Additional filesystem types explicitly approved for chmod.
+   * Examples: `ext4`, `xfs`, `zfs`, `btrfs`.
+   */
+  allowFsTypes?: string[];
+  /**
+   * Filesystem names treated as FAT-style and allowed by default.
+   * Override only when you need a custom classification set.
+   */
+  fatFsTypes?: string[];
+}
+
 export interface ContainerInfo {
   name: string;
   image: string;
@@ -430,6 +454,12 @@ export interface VolumeIssue {
 export interface HealthCheckOptions {
   healthCheck?: () => Promise<boolean>;
   onUnhealthy?: (name: string, error: string) => void;
+  /**
+   * Internal lifecycle policy injected by signalk-container's wrapper.
+   * Consumer plugins should configure this via signalk-container's
+   * plugin settings, not per ensureRunning() call.
+   */
+  permissionFixPolicy?: PermissionFixPolicy;
 }
 
 /**
@@ -699,6 +729,11 @@ export interface PluginConfig {
   maxConcurrentJobs: number;
   updateCheckInterval?: string;
   backgroundUpdateChecks?: boolean;
+  /**
+   * Controls whether and where bind-mount permission-fix chmod may run.
+   * Defaults to FAT-only allow; non-FAT filesystems require explicit opt-in.
+   */
+  permissionFix?: PermissionFixPolicy;
   /**
    * Per-container user overrides for resource limits, keyed by
    * container name (without `sk-` prefix). Field-level merged on top
