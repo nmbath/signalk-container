@@ -1,5 +1,12 @@
 import * as net from "node:net";
-import { existsSync, readFileSync, statfsSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statfsSync,
+} from "node:fs";
+import path from "node:path";
 import {
   ContainerConfig,
   ContainerInfo,
@@ -528,6 +535,8 @@ const DEFAULT_FAT_FS_TYPES = new Set([
   "fat32",
   "texfat",
 ]);
+const DEFAULT_WATCHED_ROOTS = ["/media", "/mnt"];
+const DEV_DISK_BY_UUID = "/dev/disk/by-uuid";
 
 const FS_MAGIC_TO_NAME = new Map<number, string>([
   [0x4d44, "msdos"],
@@ -541,7 +550,9 @@ const FS_MAGIC_TO_NAME = new Map<number, string>([
 function normalizePolicy(policy: PermissionFixPolicy | undefined): {
   enabled: boolean;
   fatFsTypes: Set<string>;
-  allowFsTypes: Set<string>;
+  watchedRoots: string[];
+  allowedUuids: Set<string>;
+  deniedUuids: Set<string>;
 } {
   const enabled = policy?.enabled !== false;
   const fatFsTypes = new Set(
@@ -550,10 +561,104 @@ function normalizePolicy(policy: PermissionFixPolicy | undefined): {
       : [...DEFAULT_FAT_FS_TYPES]
     ).map((v) => v.toLowerCase().trim()),
   );
-  const allowFsTypes = new Set(
-    (policy?.allowFsTypes ?? []).map((v) => v.toLowerCase().trim()),
+  const watchedRoots = Array.from(
+    new Set(
+      (policy?.watchedRoots ?? DEFAULT_WATCHED_ROOTS)
+        .map((v) => v.trim())
+        .filter((v) => v.startsWith("/")),
+    ),
   );
-  return { enabled, fatFsTypes, allowFsTypes };
+  const allowedUuids = new Set(
+    (policy?.allowedUuids ?? []).map((v) => v.toLowerCase().trim()),
+  );
+  const deniedUuids = new Set(
+    (policy?.deniedUuids ?? []).map((v) => v.toLowerCase().trim()),
+  );
+  return { enabled, fatFsTypes, watchedRoots, allowedUuids, deniedUuids };
+}
+
+function decodeProcMountField(input: string): string {
+  return input
+    .replace(/\\040/g, " ")
+    .replace(/\\011/g, "\t")
+    .replace(/\\012/g, "\n")
+    .replace(/\\134/g, "\\");
+}
+
+interface ProcMountEntry {
+  source: string;
+  mountPoint: string;
+  fsType: string;
+}
+
+function parseProcMounts(content: string): ProcMountEntry[] {
+  const out: ProcMountEntry[] = [];
+  for (const raw of content.split("\n")) {
+    if (!raw.trim()) continue;
+    const parts = raw.split(" ");
+    if (parts.length < 3) continue;
+    out.push({
+      source: decodeProcMountField(parts[0] ?? ""),
+      mountPoint: decodeProcMountField(parts[1] ?? ""),
+      fsType: decodeProcMountField(parts[2] ?? ""),
+    });
+  }
+  return out;
+}
+
+function isUnderAnyRoot(p: string, roots: string[]): boolean {
+  return roots.some((root) => p === root || p.startsWith(`${root}/`));
+}
+
+function resolveUuidByDeviceName(): Map<string, string> {
+  const out = new Map<string, string>();
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(DEV_DISK_BY_UUID);
+  } catch {
+    return out;
+  }
+  for (const uuidEntry of entries) {
+    try {
+      const resolved = realpathSync(path.posix.join(DEV_DISK_BY_UUID, uuidEntry));
+      const deviceName = path.posix.basename(resolved);
+      if (deviceName) out.set(deviceName, uuidEntry.toLowerCase());
+    } catch {
+      // ignore broken links/permission errors
+    }
+  }
+  return out;
+}
+
+function uuidFromSource(source: string, uuidByDeviceName: Map<string, string>): string | null {
+  const normalized = source.trim();
+  if (!normalized) return null;
+  if (normalized.startsWith("UUID=")) {
+    return normalized.slice("UUID=".length).toLowerCase() || null;
+  }
+  const byUuidPrefix = "/dev/disk/by-uuid/";
+  if (normalized.startsWith(byUuidPrefix)) {
+    const maybe = path.posix.basename(normalized).toLowerCase();
+    return maybe || null;
+  }
+  const deviceName = path.posix.basename(normalized);
+  if (!deviceName) return null;
+  return uuidByDeviceName.get(deviceName) ?? null;
+}
+
+function resolveMountInfoForPath(
+  sourcePath: string,
+  mounts: ProcMountEntry[],
+): ProcMountEntry | null {
+  let best: ProcMountEntry | null = null;
+  for (const m of mounts) {
+    if (sourcePath === m.mountPoint || sourcePath.startsWith(`${m.mountPoint}/`)) {
+      if (!best || m.mountPoint.length > best.mountPoint.length) {
+        best = m;
+      }
+    }
+  }
+  return best;
 }
 
 function fsTypeFromMagic(magic: number): string | null {
@@ -570,16 +675,22 @@ function detectFsType(sourcePath: string): string | null {
   }
 }
 
-export function shouldApplyPermissionFixForFsType(
+export function shouldApplyPermissionFixForMount(
+  mountPoint: string,
   fsType: string | null,
+  uuid: string | null,
   policy: PermissionFixPolicy | undefined,
 ): boolean {
   const normalized = normalizePolicy(policy);
   if (!normalized.enabled) return false;
+  if (!isUnderAnyRoot(mountPoint, normalized.watchedRoots)) return false;
+  if (!uuid) return false;
+  if (normalized.deniedUuids.has(uuid.toLowerCase())) return false;
+  if (normalized.allowedUuids.has(uuid.toLowerCase())) return true;
   if (!fsType) return false;
   const t = fsType.toLowerCase().trim();
   if (normalized.fatFsTypes.has(t)) return true;
-  return normalized.allowFsTypes.has(t);
+  return false;
 }
 
 /**
@@ -1415,12 +1526,22 @@ async function fixVolumePermissions(
   ]);
 
   const mountLines = inspect.stdout.split("\n").filter(Boolean);
+  let mounts: ProcMountEntry[] = [];
+  try {
+    mounts = parseProcMounts(readFileSync("/proc/self/mounts", "utf8"));
+  } catch {
+    mounts = [];
+  }
+  const uuidByDeviceName = resolveUuidByDeviceName();
   const allowedDestinations: string[] = [];
   for (const line of mountLines) {
     const [source, destination] = line.split("|");
     if (!source || !destination) continue;
-    const fsType = detectFsType(source);
-    if (shouldApplyPermissionFixForFsType(fsType, permissionFixPolicy)) {
+    const mountInfo = resolveMountInfoForPath(source, mounts);
+    const fsType = mountInfo?.fsType ?? detectFsType(source);
+    const mountPoint = mountInfo?.mountPoint ?? source;
+    const uuid = uuidFromSource(mountInfo?.source ?? source, uuidByDeviceName);
+    if (shouldApplyPermissionFixForMount(mountPoint, fsType, uuid, permissionFixPolicy)) {
       allowedDestinations.push(destination);
     }
   }

@@ -162,7 +162,9 @@ export default (app: App) => {
   let currentOverrides: Record<string, ContainerResourceLimits> = {};
   let currentPermissionFixPolicy: PermissionFixPolicy = {
     enabled: true,
-    allowFsTypes: [],
+    watchedRoots: ["/media", "/mnt"],
+    allowedUuids: [],
+    deniedUuids: [],
     fatFsTypes: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
   };
   // Cached result of resolveSignalkDataSource() — resolved once on first
@@ -1474,16 +1476,29 @@ export default (app: App) => {
           title: "Bind-mount permission-fix policy",
           description:
             "Controls when signalk-container may run recursive chmod on bind mounts during stop/remove. " +
-            "By default, FAT-like filesystems are allowed and non-FAT filesystems are denied unless explicitly listed.",
+            "Only watched roots are considered. UUID is required (no mountpoint fallback). " +
+            "By default, FAT-like filesystems are allowed and non-FAT filesystems require explicit UUID allow-listing.",
           properties: {
             enabled: {
               type: "boolean",
               default: true,
               title: "Enable permission-fix chmod step",
             },
-            allowFsTypes: {
+            watchedRoots: {
               type: "array",
-              title: "Additionally allowed non-FAT filesystem types",
+              title: "Watched removable-media roots",
+              items: { type: "string" },
+              default: ["/media", "/mnt"],
+            },
+            allowedUuids: {
+              type: "array",
+              title: "Explicitly allowed filesystem UUIDs",
+              items: { type: "string" },
+              default: [],
+            },
+            deniedUuids: {
+              type: "array",
+              title: "Explicitly denied filesystem UUIDs",
               items: { type: "string" },
               default: [],
             },
@@ -1496,7 +1511,9 @@ export default (app: App) => {
           },
           default: {
             enabled: true,
-            allowFsTypes: [],
+            watchedRoots: ["/media", "/mnt"],
+            allowedUuids: [],
+            deniedUuids: [],
             fatFsTypes: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
           },
         },
@@ -1570,7 +1587,9 @@ export default (app: App) => {
       currentOverrides = config.containerOverrides ?? {};
       currentPermissionFixPolicy = {
         enabled: config.permissionFix?.enabled !== false,
-        allowFsTypes: config.permissionFix?.allowFsTypes ?? [],
+        watchedRoots: config.permissionFix?.watchedRoots ?? ["/media", "/mnt"],
+        allowedUuids: config.permissionFix?.allowedUuids ?? [],
+        deniedUuids: config.permissionFix?.deniedUuids ?? [],
         fatFsTypes:
           config.permissionFix?.fatFsTypes ??
           ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
@@ -1714,7 +1733,9 @@ export default (app: App) => {
       currentOverrides = {};
       currentPermissionFixPolicy = {
         enabled: true,
-        allowFsTypes: [],
+        watchedRoots: ["/media", "/mnt"],
+        allowedUuids: [],
+        deniedUuids: [],
         fatFsTypes: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
       };
       currentConfig = null;

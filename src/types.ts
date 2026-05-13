@@ -209,22 +209,33 @@ export interface ContainerResourceLimits {
  * Policy for signalk-container's bind-mount permission-fix step
  * (`chmod -R o+rwX ...`) that runs during stop/remove lifecycle paths.
  *
+ * Decision model is two-layer:
+ *   - only bind mounts under `watchedRoots` are considered
+ *   - filesystems are identified by UUID (no mountpoint fallback)
+ *
  * Default behavior is conservative:
- *   - FAT-style filesystems are allowed by default.
- *   - Non-FAT filesystems are denied unless explicitly listed in
- *     `allowFsTypes`.
+ *   - FAT-style filesystems are allowed by default when UUID is known
+ *   - non-FAT filesystems require explicit UUID allow-listing
  */
 export interface PermissionFixPolicy {
   /** Master switch for the permission-fix step. Defaults to true. */
   enabled?: boolean;
   /**
-   * Additional filesystem types explicitly approved for chmod.
-   * Examples: `ext4`, `xfs`, `zfs`, `btrfs`.
+   * Mount roots that may contain removable media candidates. Only bind
+   * sources under these roots are considered for chmod.
+   *
+   * Must be absolute Linux paths; defaults to ['/media', '/mnt'].
    */
-  allowFsTypes?: string[];
+  watchedRoots?: string[];
   /**
-   * Filesystem names treated as FAT-style and allowed by default.
-   * Override only when you need a custom classification set.
+   * UUIDs explicitly allowed for chmod. Required to allow non-FAT filesystems.
+   */
+  allowedUuids?: string[];
+  /** UUIDs explicitly denied for chmod. Takes precedence over allow/default. */
+  deniedUuids?: string[];
+  /**
+   * Filesystem names treated as FAT-style and allowed by default when UUID
+   * is present and not denied.
    */
   fatFsTypes?: string[];
 }
