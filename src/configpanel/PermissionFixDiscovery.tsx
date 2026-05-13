@@ -3,6 +3,9 @@ import type { DiscoveredDevice } from "../types";
 
 interface PermissionFixDiscoveryProps {
   onRefresh?: () => void;
+  allowedUuids: string[];
+  deniedUuids: string[];
+  onSetUuidPolicy: (uuid: string, mode: "default" | "allow" | "deny") => void;
 }
 
 const S: Record<string, React.CSSProperties> = {
@@ -111,10 +114,16 @@ const S: Record<string, React.CSSProperties> = {
 
 export function PermissionFixDiscovery({
   onRefresh,
+  allowedUuids,
+  deniedUuids,
+  onSetUuidPolicy,
 }: PermissionFixDiscoveryProps) {
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const allowedSet = new Set(allowedUuids.map((v) => v.toLowerCase()));
+  const deniedSet = new Set(deniedUuids.map((v) => v.toLowerCase()));
 
   const fetchDevices = async () => {
     setLoading(true);
@@ -174,8 +183,9 @@ export function PermissionFixDiscovery({
                 <th style={{ ...S.tableHeaderCell, width: "15%" }}>
                   Filesystem
                 </th>
-                <th style={{ ...S.tableHeaderCell, width: "25%" }}>UUID</th>
-                <th style={{ ...S.tableHeaderCell, width: "25%" }}>Status</th>
+                <th style={{ ...S.tableHeaderCell, width: "20%" }}>UUID</th>
+                <th style={{ ...S.tableHeaderCell, width: "20%" }}>Status</th>
+                <th style={{ ...S.tableHeaderCell, width: "10%" }}>Override</th>
               </tr>
             </thead>
             <tbody>
@@ -197,6 +207,37 @@ export function PermissionFixDiscovery({
                       </div>
                       <div style={S.reason}>{device.reason}</div>
                     </div>
+                  </td>
+                  <td style={S.tableCell}>
+                    <select
+                      disabled={!device.uuid}
+                      value={
+                        !device.uuid
+                          ? "default"
+                          : deniedSet.has(device.uuid.toLowerCase())
+                            ? "deny"
+                            : allowedSet.has(device.uuid.toLowerCase())
+                              ? "allow"
+                              : "default"
+                      }
+                      onChange={(e) => {
+                        if (!device.uuid) return;
+                        const mode = e.target.value as "default" | "allow" | "deny";
+                        onSetUuidPolicy(device.uuid, mode);
+                      }}
+                      style={{
+                        padding: "4px 6px",
+                        fontSize: 11,
+                        borderRadius: 4,
+                        border: "1px solid #d1d5db",
+                        width: "100%",
+                        background: device.uuid ? "#fff" : "#f3f4f6",
+                      }}
+                    >
+                      <option value="default">Default</option>
+                      <option value="allow">Allow</option>
+                      <option value="deny">Block</option>
+                    </select>
                   </td>
                 </tr>
               ))}

@@ -1043,6 +1043,12 @@ export default function PluginConfigurationPanel({
   const [backgroundUpdateChecks, setBackgroundUpdateChecks] = useState(
     cfg.backgroundUpdateChecks !== false,
   );
+  const [permissionFixAllowedUuids, setPermissionFixAllowedUuids] = useState(
+    cfg.permissionFix?.allowedUuids || [],
+  );
+  const [permissionFixDeniedUuids, setPermissionFixDeniedUuids] = useState(
+    cfg.permissionFix?.deniedUuids || [],
+  );
   // containerOverrides is a Record<string, ContainerResourceLimits> keyed
   // by the UNPREFIXED container name. Spread into `doSave` so the global
   // Save Configuration button persists it alongside the other settings,
@@ -1410,6 +1416,15 @@ export default function PluginConfigurationPanel({
       maxConcurrentJobs: cfg.maxConcurrentJobs || 2,
       updateCheckInterval,
       backgroundUpdateChecks,
+      permissionFix: {
+        enabled: cfg.permissionFix?.enabled !== false,
+        watchedRoots: cfg.permissionFix?.watchedRoots ?? ["/media", "/mnt"],
+        allowedUuids: permissionFixAllowedUuids,
+        deniedUuids: permissionFixDeniedUuids,
+        fatFsTypes:
+          cfg.permissionFix?.fatFsTypes ??
+          ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+      },
       containerOverrides: overridesFromServer,
     });
     setActionStatus("Saved! Plugin will restart.");
@@ -1508,6 +1523,28 @@ export default function PluginConfigurationPanel({
       setActionStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
       setStatusError(true);
     }
+  };
+
+  const setPermissionFixUuidPolicy = (
+    uuid: string,
+    mode: "default" | "allow" | "deny",
+  ) => {
+    const normalized = uuid.trim().toLowerCase();
+    if (!normalized) return;
+
+    setPermissionFixAllowedUuids((prev) => {
+      const next = new Set(prev.map((v) => v.toLowerCase()));
+      next.delete(normalized);
+      if (mode === "allow") next.add(normalized);
+      return Array.from(next);
+    });
+
+    setPermissionFixDeniedUuids((prev) => {
+      const next = new Set(prev.map((v) => v.toLowerCase()));
+      next.delete(normalized);
+      if (mode === "deny") next.add(normalized);
+      return Array.from(next);
+    });
   };
 
   return (
@@ -1806,7 +1843,11 @@ export default function PluginConfigurationPanel({
         })
       )}
 
-      <PermissionFixDiscovery />
+      <PermissionFixDiscovery
+        allowedUuids={permissionFixAllowedUuids}
+        deniedUuids={permissionFixDeniedUuids}
+        onSetUuidPolicy={setPermissionFixUuidPolicy}
+      />
 
       <div style={S.sectionTitle}>Maintenance</div>
 
