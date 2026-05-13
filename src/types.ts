@@ -240,6 +240,23 @@ export interface PermissionFixPolicy {
   fatFsTypes?: string[];
 }
 
+/**
+ * A device discovered under the watched roots, with its UUID, filesystem type,
+ * and policy decision (allowed/blocked with reasoning).
+ */
+export interface DiscoveredDevice {
+  /** Mount point (absolute path) */
+  mountPoint: string;
+  /** Filesystem type (e.g. ext4, zfs, vfat, exfat) */
+  fsType: string | null;
+  /** Filesystem UUID, or null if not resolvable */
+  uuid: string | null;
+  /** Whether chmod will be applied to this device */
+  allowed: boolean;
+  /** Human-readable explanation of the decision */
+  reason: string;
+}
+
 export interface ContainerInfo {
   name: string;
   image: string;

@@ -31,6 +31,7 @@ import {
   collectRecoveredVolumes,
   connectToNetwork,
   disconnectFromNetwork,
+  discoverDevicesUnderWatchedRoots,
   ensureNetwork,
   ensureRunning,
   execInContainer,
@@ -2115,6 +2116,29 @@ export default (app: App) => {
             logStreamBrokers.delete(name);
           }
         });
+      });
+
+      router.get("/api/permission-fix/discovered-devices", (_req, res) => {
+        try {
+          const devices = discoverDevicesUnderWatchedRoots(
+            currentPermissionFixPolicy,
+          );
+          app.debug(
+            `Permission-fix policy discovery: found ${devices.length} device(s)`,
+          );
+          for (const device of devices) {
+            const status = device.allowed ? "ALLOWED" : "BLOCKED";
+            app.debug(
+              `  [${status}] ${device.mountPoint} (${device.fsType ?? "unknown"}) UUID=${device.uuid ?? "unknown"} — ${device.reason}`,
+            );
+          }
+          res.json({ devices });
+        } catch (err) {
+          app.error("Permission-fix discovery failed:", err);
+          res.status(500).json({
+            error: err instanceof Error ? err.message : "Unknown error",
+          });
+        }
       });
 
       router.post("/api/prune", async (_req, res) => {

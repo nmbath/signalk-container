@@ -10,6 +10,7 @@ import path from "node:path";
 import {
   ContainerConfig,
   ContainerInfo,
+  DiscoveredDevice,
   PermissionFixPolicy,
   ContainerRuntimeInfo,
   ContainerState,
@@ -691,6 +692,86 @@ export function shouldApplyPermissionFixForMount(
   const t = fsType.toLowerCase().trim();
   if (normalized.fatFsTypes.has(t)) return true;
   return false;
+}
+
+/**
+ * Discover all filesystems mounted under the watched roots and classify
+ * each by the permission-fix policy. Returns an array of DiscoveredDevice
+ * with mount point, filesystem type, UUID, whether chmod will be applied,
+ * and a human-readable reason for the decision.
+ *
+ * Used by the API endpoint and debug logging to show users what the policy
+ * sees and what it will/won't chmod.
+ */
+export function discoverDevicesUnderWatchedRoots(
+  policy: PermissionFixPolicy | undefined,
+): DiscoveredDevice[] {
+  const normalized = normalizePolicy(policy);
+  const devices: DiscoveredDevice[] = [];
+
+  if (!normalized.enabled) {
+    return devices;
+  }
+
+  let mounts: ProcMountEntry[] = [];
+  try {
+    mounts = parseProcMounts(readFileSync("/proc/self/mounts", "utf8"));
+  } catch {
+    return devices;
+  }
+
+  const uuidByDeviceName = resolveUuidByDeviceName();
+  const seenMountPoints = new Set<string>();
+
+  for (const mount of mounts) {
+    if (seenMountPoints.has(mount.mountPoint)) continue;
+    if (!isUnderAnyRoot(mount.mountPoint, normalized.watchedRoots)) continue;
+
+    seenMountPoints.add(mount.mountPoint);
+
+    const fsType = mount.fsType || detectFsType(mount.mountPoint);
+    const uuid = uuidFromSource(mount.source, uuidByDeviceName);
+
+    let allowed = false;
+    let reason = "";
+
+    if (!normalized.enabled) {
+      reason = "permission fix disabled";
+    } else if (!isUnderAnyRoot(mount.mountPoint, normalized.watchedRoots)) {
+      reason = `not under watched roots: ${normalized.watchedRoots.join(", ")}`;
+    } else if (!uuid) {
+      reason = "UUID not resolvable";
+      allowed = false;
+    } else if (normalized.deniedUuids.has(uuid.toLowerCase())) {
+      reason = "explicitly denied by UUID";
+      allowed = false;
+    } else if (normalized.allowedUuids.has(uuid.toLowerCase())) {
+      reason = "explicitly allowed by UUID";
+      allowed = true;
+    } else if (!fsType) {
+      reason = "filesystem type unknown";
+      allowed = false;
+    } else {
+      const t = fsType.toLowerCase().trim();
+      if (normalized.fatFsTypes.has(t)) {
+        reason = `${fsType} (FAT-style, allowed by default)`;
+        allowed = true;
+      } else {
+        reason = `${fsType} (unix filesystem, requires explicit allow)`;
+        allowed = false;
+      }
+    }
+
+    devices.push({
+      mountPoint: mount.mountPoint,
+      fsType,
+      uuid,
+      allowed,
+      reason,
+    });
+  }
+
+  return devices;
 }
 
 /**

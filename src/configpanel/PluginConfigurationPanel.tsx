@@ -1,5 +1,6 @@
 import React, { CSSProperties, useCallback, useEffect, useState } from "react";
 import LogsModal from "./LogsModal";
+import { PermissionFixDiscovery } from "./PermissionFixDiscovery";
 import type {
   ContainerInfo,
   ContainerResourceLimits,
@@ -1804,6 +1805,8 @@ export default function PluginConfigurationPanel({
           );
         })
       )}
+
+      <PermissionFixDiscovery />
 
       <div style={S.sectionTitle}>Maintenance</div>
 
