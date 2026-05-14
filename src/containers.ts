@@ -529,6 +529,21 @@ type ExecFn = (
 
 const DEFAULT_WATCHED_ROOTS = ["/media", "/mnt"];
 const DEV_DISK_BY_UUID = "/dev/disk/by-uuid";
+const IGNORED_DISCOVERY_FS_TYPES = new Set([
+  "overlay",
+  "tmpfs",
+  "proc",
+  "sysfs",
+  "cgroup",
+  "cgroup2",
+  "devtmpfs",
+  "devpts",
+  "mqueue",
+  "nsfs",
+  "tracefs",
+  "debugfs",
+  "fusectl",
+]);
 
 const FS_MAGIC_TO_NAME = new Map<number, string>([
   [0x4d44, "msdos"],
@@ -685,6 +700,23 @@ function detectFsType(sourcePath: string): string | null {
   }
 }
 
+function shouldIgnoreDiscoveryMount(mount: ProcMountEntry): boolean {
+  const fs = mount.fsType.toLowerCase().trim();
+  if (IGNORED_DISCOVERY_FS_TYPES.has(fs)) return true;
+
+  const source = mount.source.toLowerCase().trim();
+  const mp = mount.mountPoint.toLowerCase().trim();
+
+  // Hide Docker/Podman layer mount noise under data roots.
+  if (fs === "overlay") return true;
+  if (mp.includes("/docker/overlay2/") || mp.includes("/containers/storage/overlay/")) {
+    return true;
+  }
+  if (source === "overlay") return true;
+
+  return false;
+}
+
 export function shouldApplyPermissionFixForMount(
   mountPoint: string,
   mountSource: string,
@@ -735,6 +767,7 @@ export function discoverDevicesUnderWatchedRoots(
   for (const mount of mounts) {
     if (seenMountPoints.has(mount.mountPoint)) continue;
     if (!isUnderAnyRoot(mount.mountPoint, normalized.watchedRoots)) continue;
+    if (shouldIgnoreDiscoveryMount(mount)) continue;
 
     seenMountPoints.add(mount.mountPoint);
 
