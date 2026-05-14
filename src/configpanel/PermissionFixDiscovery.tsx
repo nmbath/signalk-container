@@ -3,9 +3,18 @@ import type { DiscoveredDevice } from "../types";
 
 interface PermissionFixDiscoveryProps {
   onRefresh?: () => void;
+  watchedRoots: string[];
+  allowedMountPoints: string[];
+  deniedMountPoints: string[];
   allowedUuids: string[];
   deniedUuids: string[];
-  onSetUuidPolicy: (uuid: string, mode: "default" | "allow" | "deny") => void;
+  allowedSources: string[];
+  deniedSources: string[];
+  onSetRule: (
+    device: DiscoveredDevice,
+    target: "fixed" | "removable",
+    mode: "default" | "allow" | "deny",
+  ) => void;
 }
 
 const S: Record<string, React.CSSProperties> = {
@@ -110,20 +119,45 @@ const S: Record<string, React.CSSProperties> = {
     fontSize: 12,
     color: "#666",
   },
+  helpBox: {
+    padding: "10px 12px",
+    borderRadius: 6,
+    border: "1px solid #dbeafe",
+    background: "#eff6ff",
+    color: "#1e3a8a",
+    fontSize: 12,
+    marginBottom: 12,
+    lineHeight: 1.45,
+  },
+  mountSource: {
+    marginTop: 2,
+    fontSize: 11,
+    color: "#666",
+    fontFamily: "monospace",
+  },
 };
 
 export function PermissionFixDiscovery({
   onRefresh,
+  watchedRoots,
+  allowedMountPoints,
+  deniedMountPoints,
   allowedUuids,
   deniedUuids,
-  onSetUuidPolicy,
+  allowedSources,
+  deniedSources,
+  onSetRule,
 }: PermissionFixDiscoveryProps) {
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const allowedMountSet = new Set(allowedMountPoints.map((v) => v.toLowerCase()));
+  const deniedMountSet = new Set(deniedMountPoints.map((v) => v.toLowerCase()));
   const allowedSet = new Set(allowedUuids.map((v) => v.toLowerCase()));
   const deniedSet = new Set(deniedUuids.map((v) => v.toLowerCase()));
+  const allowedSourceSet = new Set(allowedSources.map((v) => v.toLowerCase()));
+  const deniedSourceSet = new Set(deniedSources.map((v) => v.toLowerCase()));
 
   const fetchDevices = async () => {
     setLoading(true);
@@ -153,6 +187,23 @@ export function PermissionFixDiscovery({
     <div>
       <div style={S.section}>
         <div style={S.title}>Permission-Fix Policy</div>
+        <div style={S.helpBox}>
+          <div>
+            For each mount: choose <strong>how to match it</strong> and <strong>whether to include chmod permission-fix</strong>.
+          </div>
+          <div>
+            <strong>Fixed mount</strong> stores rule by mount point (for example /mnt/storage).
+          </div>
+          <div>
+            <strong>Removable device/share</strong> stores rule by UUID or source (server/path), so it still applies if mounted elsewhere.
+          </div>
+          <div>
+            Note: removable devices often come back at the same path, but identity matching still protects you if the path changes.
+          </div>
+          <div>
+            Only mounts under watched roots are shown: {watchedRoots.length > 0 ? watchedRoots.join(", ") : "(none)"}.
+          </div>
+        </div>
         <div style={S.controls}>
           <button
             style={
@@ -179,23 +230,21 @@ export function PermissionFixDiscovery({
           <table style={S.table}>
             <thead style={S.tableHeader}>
               <tr>
-                <th style={{ ...S.tableHeaderCell, width: "35%" }}>Mount Point</th>
-                <th style={{ ...S.tableHeaderCell, width: "15%" }}>
-                  Filesystem
-                </th>
-                <th style={{ ...S.tableHeaderCell, width: "20%" }}>UUID</th>
-                <th style={{ ...S.tableHeaderCell, width: "20%" }}>Status</th>
-                <th style={{ ...S.tableHeaderCell, width: "10%" }}>Override</th>
+                <th style={{ ...S.tableHeaderCell, width: "45%" }}>Mount</th>
+                <th style={{ ...S.tableHeaderCell, width: "15%" }}>Type</th>
+                <th style={{ ...S.tableHeaderCell, width: "15%" }}>Current</th>
+                <th style={{ ...S.tableHeaderCell, width: "12%" }}>Match By</th>
+                <th style={{ ...S.tableHeaderCell, width: "13%" }}>Decision</th>
               </tr>
             </thead>
             <tbody>
               {devices.map((device, idx) => (
                 <tr key={idx} style={S.tableRow}>
-                  <td style={S.tableCell}>{device.mountPoint}</td>
-                  <td style={S.tableCell}>{device.fsType || "unknown"}</td>
-                  <td style={{ ...S.tableCell, ...S.uuid }}>
-                    {device.uuid ? device.uuid.slice(0, 12) : "—"}
+                  <td style={S.tableCell}>
+                    <div>{device.mountPoint}</div>
+                    <div style={S.mountSource}>{device.source}</div>
                   </td>
+                  <td style={S.tableCell}>{device.fsType || "unknown"}</td>
                   <td style={S.tableCell}>
                     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <div
@@ -209,21 +258,85 @@ export function PermissionFixDiscovery({
                     </div>
                   </td>
                   <td style={S.tableCell}>
-                    <select
-                      disabled={!device.uuid}
-                      value={
-                        !device.uuid
-                          ? "default"
-                          : deniedSet.has(device.uuid.toLowerCase())
+                    {(() => {
+                      const mountKey = device.mountPoint.toLowerCase();
+                      const sourceKey = device.source.toLowerCase();
+                      const byMount =
+                        deniedMountSet.has(mountKey) || allowedMountSet.has(mountKey);
+                      const target: "fixed" | "removable" = byMount ? "fixed" : "removable";
+
+                      const value =
+                        target === "fixed"
+                          ? deniedMountSet.has(mountKey)
                             ? "deny"
-                            : allowedSet.has(device.uuid.toLowerCase())
+                            : allowedMountSet.has(mountKey)
                               ? "allow"
                               : "default"
-                      }
+                          : device.uuid
+                            ? deniedSet.has(device.uuid.toLowerCase())
+                              ? "deny"
+                              : allowedSet.has(device.uuid.toLowerCase())
+                                ? "allow"
+                                : "default"
+                            : deniedSourceSet.has(sourceKey)
+                              ? "deny"
+                              : allowedSourceSet.has(sourceKey)
+                                ? "allow"
+                                : "default";
+
+                      return (
+                        <select
+                          value={target}
+                          onChange={(e) => {
+                            const nextTarget = e.target.value as "fixed" | "removable";
+                            onSetRule(device, nextTarget, value as "default" | "allow" | "deny");
+                          }}
+                          style={{
+                            padding: "4px 6px",
+                            fontSize: 11,
+                            borderRadius: 4,
+                            border: "1px solid #d1d5db",
+                            width: "100%",
+                            background: "#fff",
+                          }}
+                        >
+                          <option value="fixed">Fixed</option>
+                          <option value="removable">Removable</option>
+                        </select>
+                      );
+                    })()}
+                  </td>
+                  <td style={S.tableCell}>
+                    {(() => {
+                      const mountKey = device.mountPoint.toLowerCase();
+                      const sourceKey = device.source.toLowerCase();
+                      const byMount =
+                        deniedMountSet.has(mountKey) || allowedMountSet.has(mountKey);
+                      const target: "fixed" | "removable" = byMount ? "fixed" : "removable";
+                      const value =
+                        target === "fixed"
+                          ? deniedMountSet.has(mountKey)
+                            ? "deny"
+                            : allowedMountSet.has(mountKey)
+                              ? "allow"
+                              : "default"
+                          : device.uuid
+                            ? deniedSet.has(device.uuid.toLowerCase())
+                              ? "deny"
+                              : allowedSet.has(device.uuid.toLowerCase())
+                                ? "allow"
+                                : "default"
+                            : deniedSourceSet.has(sourceKey)
+                              ? "deny"
+                              : allowedSourceSet.has(sourceKey)
+                                ? "allow"
+                                : "default";
+                      return (
+                    <select
+                      value={value}
                       onChange={(e) => {
-                        if (!device.uuid) return;
                         const mode = e.target.value as "default" | "allow" | "deny";
-                        onSetUuidPolicy(device.uuid, mode);
+                        onSetRule(device, target, mode);
                       }}
                       style={{
                         padding: "4px 6px",
@@ -231,13 +344,15 @@ export function PermissionFixDiscovery({
                         borderRadius: 4,
                         border: "1px solid #d1d5db",
                         width: "100%",
-                        background: device.uuid ? "#fff" : "#f3f4f6",
+                        background: "#fff",
                       }}
                     >
-                      <option value="default">Default</option>
-                      <option value="allow">Allow</option>
+                      <option value="default">Ignore</option>
+                      <option value="allow">Include</option>
                       <option value="deny">Block</option>
                     </select>
+                      );
+                    })()}
                   </td>
                 </tr>
               ))}

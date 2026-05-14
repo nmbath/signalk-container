@@ -209,16 +209,14 @@ export interface ContainerResourceLimits {
  * Policy for signalk-container's bind-mount permission-fix step
  * (`chmod -R o+rwX ...`) that runs during stop/remove lifecycle paths.
  *
- * Decision model is two-layer:
+ * Decision model is explicit and deny-by-default:
  *   - only bind mounts under `watchedRoots` are considered
- *   - filesystems are identified by UUID (no mountpoint fallback)
- *
- * Default behavior is conservative:
- *   - FAT-style filesystems are allowed by default when UUID is known
- *   - non-FAT filesystems require explicit UUID allow-listing
+ *   - fixed mounts can be allowed/denied by mount-point path
+ *   - removable media/shares can be allowed/denied by UUID or source
+ *   - if no stored rule matches, permission-fix is not applied
  */
 export interface PermissionFixPolicy {
-  /** Master switch for the permission-fix step. Defaults to true. */
+  /** Master switch for the permission-fix step. Defaults to false. */
   enabled?: boolean;
   /**
    * Mount roots that may contain removable media candidates. Only bind
@@ -233,11 +231,14 @@ export interface PermissionFixPolicy {
   allowedUuids?: string[];
   /** UUIDs explicitly denied for chmod. Takes precedence over allow/default. */
   deniedUuids?: string[];
-  /**
-   * Filesystem names treated as FAT-style and allowed by default when UUID
-   * is present and not denied.
-   */
-  fatFsTypes?: string[];
+  /** Mount sources explicitly allowed for chmod (e.g. NFS/CIFS sources). */
+  allowedSources?: string[];
+  /** Mount sources explicitly denied for chmod. Takes precedence over allow/default. */
+  deniedSources?: string[];
+  /** Fixed mount points explicitly allowed for chmod. */
+  allowedMountPoints?: string[];
+  /** Fixed mount points explicitly denied for chmod. */
+  deniedMountPoints?: string[];
 }
 
 /**
@@ -247,6 +248,8 @@ export interface PermissionFixPolicy {
 export interface DiscoveredDevice {
   /** Mount point (absolute path) */
   mountPoint: string;
+  /** Mount source from /proc/self/mounts (e.g. /dev/sda1, server:/export) */
+  source: string;
   /** Filesystem type (e.g. ext4, zfs, vfat, exfat) */
   fsType: string | null;
   /** Filesystem UUID, or null if not resolvable */

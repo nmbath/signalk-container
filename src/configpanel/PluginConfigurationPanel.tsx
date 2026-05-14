@@ -5,6 +5,7 @@ import type {
   ContainerInfo,
   ContainerResourceLimits,
   ContainerRuntimeInfo,
+  DiscoveredDevice,
   PluginConfig,
 } from "../types";
 import type { UpdateCheckResult } from "../updates/types";
@@ -27,6 +28,14 @@ interface ToggleFieldProps {
   value: boolean;
   onChange: (next: boolean) => void;
   hint?: string;
+}
+
+interface TextFieldProps {
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  hint?: string;
+  placeholder?: string;
 }
 
 /**
@@ -369,6 +378,15 @@ const S: Record<string, CSSProperties> = {
     background: "#fff",
     color: "#333",
   },
+  textInput: {
+    padding: "6px 10px",
+    borderRadius: 6,
+    border: "1px solid #ccc",
+    fontSize: 13,
+    background: "#fff",
+    color: "#333",
+    minWidth: 360,
+  },
   hint: { fontSize: 11, color: "#aaa", marginLeft: 8 },
   pruneResult: {
     fontSize: 12,
@@ -441,6 +459,39 @@ function ToggleField({ label, value, onChange, hint }: ToggleFieldProps) {
       </label>
       {hint && <span style={S.hint}>{hint}</span>}
     </div>
+  );
+}
+
+function TextField({
+  label,
+  value,
+  onChange,
+  hint,
+  placeholder,
+}: TextFieldProps) {
+  return (
+    <div style={S.fieldRow}>
+      <span style={S.label}>{label}</span>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={S.textInput}
+      />
+      {hint && <span style={S.hint}>{hint}</span>}
+    </div>
+  );
+}
+
+function parseCommaList(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0),
+    ),
   );
 }
 
@@ -1043,12 +1094,27 @@ export default function PluginConfigurationPanel({
   const [backgroundUpdateChecks, setBackgroundUpdateChecks] = useState(
     cfg.backgroundUpdateChecks !== false,
   );
+  const [permissionFixEnabled, setPermissionFixEnabled] = useState(
+    cfg.permissionFix?.enabled === true,
+  );
+  const [permissionFixWatchedRootsInput, setPermissionFixWatchedRootsInput] =
+    useState((cfg.permissionFix?.watchedRoots ?? ["/media", "/mnt"]).join(", "));
   const [permissionFixAllowedUuids, setPermissionFixAllowedUuids] = useState(
     cfg.permissionFix?.allowedUuids || [],
   );
   const [permissionFixDeniedUuids, setPermissionFixDeniedUuids] = useState(
     cfg.permissionFix?.deniedUuids || [],
   );
+  const [permissionFixAllowedSources, setPermissionFixAllowedSources] = useState(
+    cfg.permissionFix?.allowedSources || [],
+  );
+  const [permissionFixDeniedSources, setPermissionFixDeniedSources] = useState(
+    cfg.permissionFix?.deniedSources || [],
+  );
+  const [permissionFixAllowedMountPoints, setPermissionFixAllowedMountPoints] =
+    useState(cfg.permissionFix?.allowedMountPoints || []);
+  const [permissionFixDeniedMountPoints, setPermissionFixDeniedMountPoints] =
+    useState(cfg.permissionFix?.deniedMountPoints || []);
   // containerOverrides is a Record<string, ContainerResourceLimits> keyed
   // by the UNPREFIXED container name. Spread into `doSave` so the global
   // Save Configuration button persists it alongside the other settings,
@@ -1106,6 +1172,8 @@ export default function PluginConfigurationPanel({
     spaceReclaimed?: string;
     error?: string;
   } | null>(null);
+  const permissionFixWatchedRoots = parseCommaList(permissionFixWatchedRootsInput)
+    .filter((v) => v.startsWith("/"));
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -1417,13 +1485,17 @@ export default function PluginConfigurationPanel({
       updateCheckInterval,
       backgroundUpdateChecks,
       permissionFix: {
-        enabled: cfg.permissionFix?.enabled !== false,
-        watchedRoots: cfg.permissionFix?.watchedRoots ?? ["/media", "/mnt"],
+        enabled: permissionFixEnabled,
+        watchedRoots:
+          permissionFixWatchedRoots.length > 0
+            ? permissionFixWatchedRoots
+            : ["/media", "/mnt"],
+        allowedMountPoints: permissionFixAllowedMountPoints,
+        deniedMountPoints: permissionFixDeniedMountPoints,
         allowedUuids: permissionFixAllowedUuids,
         deniedUuids: permissionFixDeniedUuids,
-        fatFsTypes:
-          cfg.permissionFix?.fatFsTypes ??
-          ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+        allowedSources: permissionFixAllowedSources,
+        deniedSources: permissionFixDeniedSources,
       },
       containerOverrides: overridesFromServer,
     });
@@ -1547,6 +1619,95 @@ export default function PluginConfigurationPanel({
     });
   };
 
+  const setPermissionFixSourcePolicy = (
+    source: string,
+    mode: "default" | "allow" | "deny",
+  ) => {
+    const normalized = source.trim().toLowerCase();
+    if (!normalized) return;
+
+    setPermissionFixAllowedSources((prev) => {
+      const next = new Set(prev.map((v) => v.toLowerCase()));
+      next.delete(normalized);
+      if (mode === "allow") next.add(normalized);
+      return Array.from(next);
+    });
+
+    setPermissionFixDeniedSources((prev) => {
+      const next = new Set(prev.map((v) => v.toLowerCase()));
+      next.delete(normalized);
+      if (mode === "deny") next.add(normalized);
+      return Array.from(next);
+    });
+  };
+
+  const setPermissionFixMountPointPolicy = (
+    mountPoint: string,
+    mode: "default" | "allow" | "deny",
+  ) => {
+    const normalized = mountPoint.trim().toLowerCase();
+    if (!normalized) return;
+
+    setPermissionFixAllowedMountPoints((prev) => {
+      const next = new Set(prev.map((v) => v.toLowerCase()));
+      next.delete(normalized);
+      if (mode === "allow") next.add(normalized);
+      return Array.from(next);
+    });
+
+    setPermissionFixDeniedMountPoints((prev) => {
+      const next = new Set(prev.map((v) => v.toLowerCase()));
+      next.delete(normalized);
+      if (mode === "deny") next.add(normalized);
+      return Array.from(next);
+    });
+  };
+
+  const setPermissionFixRule = (
+    device: DiscoveredDevice,
+    target: "fixed" | "removable",
+    mode: "default" | "allow" | "deny",
+  ) => {
+    const mountKey = device.mountPoint.trim().toLowerCase();
+    const sourceKey = device.source.trim().toLowerCase();
+    const uuidKey = device.uuid ? device.uuid.trim().toLowerCase() : "";
+
+    if (mountKey) {
+      setPermissionFixAllowedMountPoints((prev) =>
+        prev.map((v) => v.toLowerCase()).filter((v) => v !== mountKey),
+      );
+      setPermissionFixDeniedMountPoints((prev) =>
+        prev.map((v) => v.toLowerCase()).filter((v) => v !== mountKey),
+      );
+    }
+    if (sourceKey) {
+      setPermissionFixAllowedSources((prev) =>
+        prev.map((v) => v.toLowerCase()).filter((v) => v !== sourceKey),
+      );
+      setPermissionFixDeniedSources((prev) =>
+        prev.map((v) => v.toLowerCase()).filter((v) => v !== sourceKey),
+      );
+    }
+    if (uuidKey) {
+      setPermissionFixAllowedUuids((prev) =>
+        prev.map((v) => v.toLowerCase()).filter((v) => v !== uuidKey),
+      );
+      setPermissionFixDeniedUuids((prev) =>
+        prev.map((v) => v.toLowerCase()).filter((v) => v !== uuidKey),
+      );
+    }
+
+    if (target === "fixed") {
+      setPermissionFixMountPointPolicy(device.mountPoint, mode);
+      return;
+    }
+    if (device.uuid) {
+      setPermissionFixUuidPolicy(device.uuid, mode);
+      return;
+    }
+    setPermissionFixSourcePolicy(device.source, mode);
+  };
+
   return (
     <div style={S.root}>
       <div style={S.sectionTitle}>Runtime</div>
@@ -1645,6 +1806,21 @@ export default function PluginConfigurationPanel({
         value={backgroundUpdateChecks}
         onChange={setBackgroundUpdateChecks}
         hint="Disable on metered connections; manual check still works"
+      />
+
+      <ToggleField
+        label="Permission-fix chmod"
+        value={permissionFixEnabled}
+        onChange={setPermissionFixEnabled}
+        hint="Global on/off for chmod step"
+      />
+
+      <TextField
+        label="Watched mount roots"
+        value={permissionFixWatchedRootsInput}
+        onChange={setPermissionFixWatchedRootsInput}
+        placeholder="/media, /mnt, /srv/shares"
+        hint="Comma-separated absolute paths"
       />
 
       <div style={S.sectionTitle}>Managed Containers</div>
@@ -1844,9 +2020,14 @@ export default function PluginConfigurationPanel({
       )}
 
       <PermissionFixDiscovery
+        watchedRoots={permissionFixWatchedRoots}
+        allowedMountPoints={permissionFixAllowedMountPoints}
+        deniedMountPoints={permissionFixDeniedMountPoints}
         allowedUuids={permissionFixAllowedUuids}
         deniedUuids={permissionFixDeniedUuids}
-        onSetUuidPolicy={setPermissionFixUuidPolicy}
+        allowedSources={permissionFixAllowedSources}
+        deniedSources={permissionFixDeniedSources}
+        onSetRule={setPermissionFixRule}
       />
 
       <div style={S.sectionTitle}>Maintenance</div>

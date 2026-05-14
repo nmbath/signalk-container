@@ -527,15 +527,6 @@ type ExecFn = (
   args: string[],
 ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
-const DEFAULT_FAT_FS_TYPES = new Set([
-  "exfat",
-  "exfat-fuse",
-  "vfat",
-  "msdos",
-  "fat",
-  "fat32",
-  "texfat",
-]);
 const DEFAULT_WATCHED_ROOTS = ["/media", "/mnt"];
 const DEV_DISK_BY_UUID = "/dev/disk/by-uuid";
 
@@ -550,18 +541,15 @@ const FS_MAGIC_TO_NAME = new Map<number, string>([
 
 function normalizePolicy(policy: PermissionFixPolicy | undefined): {
   enabled: boolean;
-  fatFsTypes: Set<string>;
   watchedRoots: string[];
   allowedUuids: Set<string>;
   deniedUuids: Set<string>;
+  allowedSources: Set<string>;
+  deniedSources: Set<string>;
+  allowedMountPoints: Set<string>;
+  deniedMountPoints: Set<string>;
 } {
-  const enabled = policy?.enabled !== false;
-  const fatFsTypes = new Set(
-    (policy?.fatFsTypes && policy.fatFsTypes.length > 0
-      ? policy.fatFsTypes
-      : [...DEFAULT_FAT_FS_TYPES]
-    ).map((v) => v.toLowerCase().trim()),
-  );
+  const enabled = policy?.enabled === true;
   const watchedRoots = Array.from(
     new Set(
       (policy?.watchedRoots ?? DEFAULT_WATCHED_ROOTS)
@@ -575,7 +563,28 @@ function normalizePolicy(policy: PermissionFixPolicy | undefined): {
   const deniedUuids = new Set(
     (policy?.deniedUuids ?? []).map((v) => v.toLowerCase().trim()),
   );
-  return { enabled, fatFsTypes, watchedRoots, allowedUuids, deniedUuids };
+  const allowedSources = new Set(
+    (policy?.allowedSources ?? []).map((v) => v.toLowerCase().trim()),
+  );
+  const deniedSources = new Set(
+    (policy?.deniedSources ?? []).map((v) => v.toLowerCase().trim()),
+  );
+  const allowedMountPoints = new Set(
+    (policy?.allowedMountPoints ?? []).map((v) => v.toLowerCase().trim()),
+  );
+  const deniedMountPoints = new Set(
+    (policy?.deniedMountPoints ?? []).map((v) => v.toLowerCase().trim()),
+  );
+  return {
+    enabled,
+    watchedRoots,
+    allowedUuids,
+    deniedUuids,
+    allowedSources,
+    deniedSources,
+    allowedMountPoints,
+    deniedMountPoints,
+  };
 }
 
 function decodeProcMountField(input: string): string {
@@ -678,19 +687,23 @@ function detectFsType(sourcePath: string): string | null {
 
 export function shouldApplyPermissionFixForMount(
   mountPoint: string,
-  fsType: string | null,
+  mountSource: string,
+  _fsType: string | null,
   uuid: string | null,
   policy: PermissionFixPolicy | undefined,
 ): boolean {
   const normalized = normalizePolicy(policy);
   if (!normalized.enabled) return false;
   if (!isUnderAnyRoot(mountPoint, normalized.watchedRoots)) return false;
+  const mountKey = mountPoint.toLowerCase().trim();
+  if (mountKey && normalized.deniedMountPoints.has(mountKey)) return false;
+  if (mountKey && normalized.allowedMountPoints.has(mountKey)) return true;
+  const sourceKey = mountSource.toLowerCase().trim();
+  if (sourceKey && normalized.deniedSources.has(sourceKey)) return false;
+  if (sourceKey && normalized.allowedSources.has(sourceKey)) return true;
   if (!uuid) return false;
   if (normalized.deniedUuids.has(uuid.toLowerCase())) return false;
   if (normalized.allowedUuids.has(uuid.toLowerCase())) return true;
-  if (!fsType) return false;
-  const t = fsType.toLowerCase().trim();
-  if (normalized.fatFsTypes.has(t)) return true;
   return false;
 }
 
@@ -708,10 +721,6 @@ export function discoverDevicesUnderWatchedRoots(
 ): DiscoveredDevice[] {
   const normalized = normalizePolicy(policy);
   const devices: DiscoveredDevice[] = [];
-
-  if (!normalized.enabled) {
-    return devices;
-  }
 
   let mounts: ProcMountEntry[] = [];
   try {
@@ -731,6 +740,8 @@ export function discoverDevicesUnderWatchedRoots(
 
     const fsType = mount.fsType || detectFsType(mount.mountPoint);
     const uuid = uuidFromSource(mount.source, uuidByDeviceName);
+    const mountKey = mount.mountPoint.toLowerCase().trim();
+    const sourceKey = mount.source.toLowerCase().trim();
 
     let allowed = false;
     let reason = "";
@@ -739,8 +750,20 @@ export function discoverDevicesUnderWatchedRoots(
       reason = "permission fix disabled";
     } else if (!isUnderAnyRoot(mount.mountPoint, normalized.watchedRoots)) {
       reason = `not under watched roots: ${normalized.watchedRoots.join(", ")}`;
+    } else if (mountKey && normalized.deniedMountPoints.has(mountKey)) {
+      reason = "blocked by fixed mount-point rule";
+      allowed = false;
+    } else if (mountKey && normalized.allowedMountPoints.has(mountKey)) {
+      reason = "allowed by fixed mount-point rule";
+      allowed = true;
+    } else if (sourceKey && normalized.deniedSources.has(sourceKey)) {
+      reason = "explicitly denied by source";
+      allowed = false;
+    } else if (sourceKey && normalized.allowedSources.has(sourceKey)) {
+      reason = "explicitly allowed by source";
+      allowed = true;
     } else if (!uuid) {
-      reason = "UUID not resolvable";
+      reason = "no stored rule for mount/source/UUID";
       allowed = false;
     } else if (normalized.deniedUuids.has(uuid.toLowerCase())) {
       reason = "explicitly denied by UUID";
@@ -748,22 +771,14 @@ export function discoverDevicesUnderWatchedRoots(
     } else if (normalized.allowedUuids.has(uuid.toLowerCase())) {
       reason = "explicitly allowed by UUID";
       allowed = true;
-    } else if (!fsType) {
-      reason = "filesystem type unknown";
-      allowed = false;
     } else {
-      const t = fsType.toLowerCase().trim();
-      if (normalized.fatFsTypes.has(t)) {
-        reason = `${fsType} (FAT-style, allowed by default)`;
-        allowed = true;
-      } else {
-        reason = `${fsType} (unix filesystem, requires explicit allow)`;
-        allowed = false;
-      }
+      reason = "no stored rule for mount/source/UUID";
+      allowed = false;
     }
 
     devices.push({
       mountPoint: mount.mountPoint,
+      source: mount.source,
       fsType,
       uuid,
       allowed,
@@ -1622,7 +1637,15 @@ async function fixVolumePermissions(
     const fsType = mountInfo?.fsType ?? detectFsType(source);
     const mountPoint = mountInfo?.mountPoint ?? source;
     const uuid = uuidFromSource(mountInfo?.source ?? source, uuidByDeviceName);
-    if (shouldApplyPermissionFixForMount(mountPoint, fsType, uuid, permissionFixPolicy)) {
+    if (
+      shouldApplyPermissionFixForMount(
+        mountPoint,
+        mountInfo?.source ?? source,
+        fsType,
+        uuid,
+        permissionFixPolicy,
+      )
+    ) {
       allowedDestinations.push(destination);
     }
   }

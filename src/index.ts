@@ -162,11 +162,14 @@ export default (app: App) => {
   const perCallOnContainerLogUnsub = new Map<string, () => void>();
   let currentOverrides: Record<string, ContainerResourceLimits> = {};
   let currentPermissionFixPolicy: PermissionFixPolicy = {
-    enabled: true,
+    enabled: false,
     watchedRoots: ["/media", "/mnt"],
     allowedUuids: [],
     deniedUuids: [],
-    fatFsTypes: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+    allowedSources: [],
+    deniedSources: [],
+    allowedMountPoints: [],
+    deniedMountPoints: [],
   };
   // Cached result of resolveSignalkDataSource() — resolved once on first
   // ensureRunning() call that uses signalkDataMount, then reused.
@@ -1477,12 +1480,12 @@ export default (app: App) => {
           title: "Bind-mount permission-fix policy",
           description:
             "Controls when signalk-container may run recursive chmod on bind mounts during stop/remove. " +
-            "Only watched roots are considered. UUID is required (no mountpoint fallback). " +
-            "By default, FAT-like filesystems are allowed and non-FAT filesystems require explicit UUID allow-listing.",
+            "Only watched roots are considered. No mount is chmodded by default. " +
+            "You can explicitly allow or block fixed mount points, removable UUIDs, and network-share sources.",
           properties: {
             enabled: {
               type: "boolean",
-              default: true,
+              default: false,
               title: "Enable permission-fix chmod step",
             },
             watchedRoots: {
@@ -1503,19 +1506,40 @@ export default (app: App) => {
               items: { type: "string" },
               default: [],
             },
-            fatFsTypes: {
+            allowedSources: {
               type: "array",
-              title: "Filesystem types treated as FAT-like (allowed by default)",
+              title: "Explicitly allowed mount sources",
               items: { type: "string" },
-              default: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+              default: [],
+            },
+            deniedSources: {
+              type: "array",
+              title: "Explicitly denied mount sources",
+              items: { type: "string" },
+              default: [],
+            },
+            allowedMountPoints: {
+              type: "array",
+              title: "Explicitly allowed fixed mount points",
+              items: { type: "string" },
+              default: [],
+            },
+            deniedMountPoints: {
+              type: "array",
+              title: "Explicitly denied fixed mount points",
+              items: { type: "string" },
+              default: [],
             },
           },
           default: {
-            enabled: true,
+            enabled: false,
             watchedRoots: ["/media", "/mnt"],
             allowedUuids: [],
             deniedUuids: [],
-            fatFsTypes: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+            allowedSources: [],
+            deniedSources: [],
+            allowedMountPoints: [],
+            deniedMountPoints: [],
           },
         },
         containerOverrides: {
@@ -1587,13 +1611,14 @@ export default (app: App) => {
       // on the next ensureRunning() call from each consumer.
       currentOverrides = config.containerOverrides ?? {};
       currentPermissionFixPolicy = {
-        enabled: config.permissionFix?.enabled !== false,
+        enabled: config.permissionFix?.enabled === true,
         watchedRoots: config.permissionFix?.watchedRoots ?? ["/media", "/mnt"],
         allowedUuids: config.permissionFix?.allowedUuids ?? [],
         deniedUuids: config.permissionFix?.deniedUuids ?? [],
-        fatFsTypes:
-          config.permissionFix?.fatFsTypes ??
-          ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+        allowedSources: config.permissionFix?.allowedSources ?? [],
+        deniedSources: config.permissionFix?.deniedSources ?? [],
+        allowedMountPoints: config.permissionFix?.allowedMountPoints ?? [],
+        deniedMountPoints: config.permissionFix?.deniedMountPoints ?? [],
       };
 
       // Instantiate the update service synchronously so consumer
@@ -1733,11 +1758,14 @@ export default (app: App) => {
       pluginDefaults.clear();
       currentOverrides = {};
       currentPermissionFixPolicy = {
-        enabled: true,
+        enabled: false,
         watchedRoots: ["/media", "/mnt"],
         allowedUuids: [],
         deniedUuids: [],
-        fatFsTypes: ["exfat", "exfat-fuse", "vfat", "msdos", "fat", "fat32", "texfat"],
+        allowedSources: [],
+        deniedSources: [],
+        allowedMountPoints: [],
+        deniedMountPoints: [],
       };
       currentConfig = null;
       cachedDataSource = null;
